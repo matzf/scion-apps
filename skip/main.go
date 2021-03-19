@@ -20,18 +20,16 @@ import (
 	"bytes"
 	"crypto/tls"
 	_ "embed"
+	"errors"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"log"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"strings"
 	"text/template"
 
-	"github.com/gorilla/handlers"
 	"github.com/netsec-ethz/scion-apps/pkg/shttp"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
@@ -59,20 +57,32 @@ func main() {
 	kingpin.Flag("bind", "Address to bind on").Default("localhost:8888").TCPVar(&bindAddress)
 	kingpin.Parse()
 
-	transport := shttp.NewRoundTripper(&tls.Config{InsecureSkipVerify: true}, nil)
-	defer transport.Close()
-	proxy := &proxyHandler{
-		transport: transport,
-	}
-	mux := http.NewServeMux()
-	mux.Handle("localhost/skip.pac", http.HandlerFunc(handleWPAD))
-	if bindAddress.IP != nil {
-		mux.Handle(bindAddress.IP.String()+"/skip.pac", http.HandlerFunc(handleWPAD))
-	}
-	mux.Handle("/", proxy) // everything else
+	/*
+		transport := shttp.NewRoundTripper(&tls.Config{InsecureSkipVerify: true}, nil)
+		defer transport.Close()
+		proxy := &proxyHandler{
+			transport: transport,
+		}
+		r := mux.NewRouter()
+		r.HandleFunc("/skip.pac", handleWPAD).Host("localhost")
+		if bindAddress.IP != nil {
+			r.HandleFunc("/skip.pac", handleWPAD).Host(bindAddress.IP.String())
+		}
+		r.HandleFunc("/", handleTunneling).Methods("CONNECT")
+		r.Handle("/", proxy) // everything else
+		r.Use(func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				log.Println(r.RequestURI, r.Method)
+				next.ServeHTTP(w, r)
+			})
+		})
+		r.Use(func(next http.Handler) http.Handler {
+			return handlers.LoggingHandler(os.Stdout, next)
+		})
+	*/
 	server := &http.Server{
 		Addr:    bindAddress.String(),
-		Handler: handlers.LoggingHandler(os.Stdout, mux),
+		Handler: http.HandlerFunc(handleTunneling),
 	}
 	log.Fatal(server.ListenAndServe())
 }
@@ -93,13 +103,11 @@ type proxyHandler struct {
 }
 
 func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	hostMunged := req.Host
+	fmt.Println("proxy", req.Host, req.Method)
 	host := demunge(req.Host)
 	req.Host = host
 	req.URL.Scheme = "https"
 	req.URL.Host = host
-	// Only accept plain text so we can munge the host name in the body without decompressing (lazy)
-	req.Header.Del("Accept-Encoding")
 
 	resp, err := h.transport.RoundTrip(req)
 	if err != nil {
@@ -107,40 +115,95 @@ func (h *proxyHandler) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-	copyAndReplaceHeader(w.Header(), resp.Header, host, hostMunged)
+	copyHeader(w.Header(), resp.Header)
 	w.WriteHeader(resp.StatusCode)
-	if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/html") {
-		fmt.Println("replacing")
-		copyAndReplace(w, resp.Body, host, hostMunged)
-	} else {
-		_, _ = io.Copy(w, resp.Body)
-	}
+	_, _ = io.Copy(w, resp.Body)
 }
 
-func copyAndReplaceHeader(dst, src http.Header, host, hostMunged string) {
+func copyHeader(dst, src http.Header) {
 	for k, vv := range src {
 		for _, v := range vv {
-			vMunged := replaceMunged([]byte(v), host, hostMunged)
-			dst.Add(k, string(vMunged))
+			dst.Add(k, v)
 		}
 	}
 }
 
-func copyAndReplace(w io.Writer, body io.Reader, host, hostMunged string) {
-	// ReadAll, not the most elegant solution...
-	b, _ := ioutil.ReadAll(body)
-	b = replaceMunged(b, host, hostMunged)
-	_, _ = w.Write(b)
+func handleTunneling(w http.ResponseWriter, req *http.Request) {
+	fmt.Println(req.Host, req.Method)
+	/*
+		session, err := appquic.DialEarly(
+			r.Host,
+			&tls.Config{
+				InsecureSkipVerify: true,
+				NextProtos:         []string{"h3-29", "h3-32"},
+			},
+			nil)
+		if err != nil {
+			fmt.Println(err.Error())
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		fmt.Println("dialed", session.LocalAddr(), session.RemoteAddr())
+		dest_conn, err := session.OpenStream()
+	*/
+	transport := shttp.NewRoundTripper(&tls.Config{InsecureSkipVerify: true}, nil)
+	defer transport.Close()
+	resp, err := transport.RoundTrip(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	defer resp.Body.Close()
+	w.WriteHeader(http.StatusOK)
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		panic("Hijacking not supported")
+	}
+	client_conn, _, err := hijacker.Hijack()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+	}
+	go transfer("d->c", dest_conn, client_conn)
+	go transfer("c->d", client_conn, dest_conn)
 }
 
-// replaceMunged replaces http://<host> or https://<host> with http://<hostMunged>, so
-// for example it replaces https://www.scionlab.org with http://www.scionlab.org.scion
-// This replacement is applied to both headers and html body so that most links and redirects
-// should work.
-func replaceMunged(s []byte, host, hostMunged string) []byte {
-	// compile and compile again, not super elegant either...
-	reOriginal := regexp.MustCompile(`http(s)?://` + regexp.QuoteMeta(host))
-	return reOriginal.ReplaceAll(s, []byte("http://"+hostMunged))
+func transfer(dir string, dst io.WriteCloser, src io.ReadCloser) {
+	defer dst.Close()
+	defer src.Close()
+	fmt.Println("copying")
+	buf := make([]byte, 1024)
+	var err error
+	var written int64
+	for {
+		nr, er := src.Read(buf)
+		fmt.Println(dir, "read", nr, er)
+		if nr > 0 {
+			nw, ew := dst.Write(buf[0:nr])
+			if nw < 0 || nr < nw {
+				nw = 0
+				if ew == nil {
+					ew = errors.New("invalid write")
+				}
+			}
+			written += int64(nw)
+			fmt.Println(dir, err, written)
+			if ew != nil {
+				err = ew
+				break
+			}
+			if nr != nw {
+				err = io.ErrShortWrite
+				break
+			}
+		}
+		if er != nil {
+			if er != io.EOF {
+				err = er
+			}
+			break
+		}
+	}
+	fmt.Println(dir, err, written)
 }
 
 // demunge reverts the host name to a proper SCION address, from the format
@@ -154,7 +217,6 @@ func demunge(host string) string {
 			strings.ReplaceAll(parts[mungedScionAddrASIndex], "_", ":"),
 			parts[mungedScionAddrHostIndex],
 		)
-	} else {
-		return strings.TrimSuffix(host, ".scion")
 	}
+	return host
 }
