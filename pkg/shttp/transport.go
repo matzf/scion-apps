@@ -18,14 +18,15 @@
 package shttp
 
 import (
+	"context"
 	"crypto/tls"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
 
 	"github.com/lucas-clemente/quic-go"
-	"github.com/lucas-clemente/quic-go/http3"
 	"github.com/netsec-ethz/scion-apps/pkg/appnet"
 	"github.com/netsec-ethz/scion-apps/pkg/appnet/appquic"
 )
@@ -40,9 +41,23 @@ type RoundTripper interface {
 // of an http.Client.
 func NewRoundTripper(tlsClientCfg *tls.Config, quicCfg *quic.Config) RoundTripper {
 	return &roundTripper{
-		&http3.RoundTripper{
-			Dial:            dial,
-			QuicConfig:      quicCfg,
+		&http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				// Note: for https we have two TLS! This is the config for pretend-its-TCP QUIC
+				tlsCfg := &tls.Config{
+					NextProtos:         []string{nextProtoRaw},
+					InsecureSkipVerify: true,
+				}
+				sess, err := appquic.Dial(appnet.UnmangleSCIONAddr(addr), tlsCfg, quicCfg)
+				if err != nil {
+					return nil, err
+				}
+				stream, err := sess.OpenStreamSync(ctx)
+				if err != nil {
+					return nil, err
+				}
+				return singleStreamSession{sess, stream}, nil
+			},
 			TLSClientConfig: tlsClientCfg,
 		},
 	}
@@ -53,7 +68,7 @@ var _ RoundTripper = (*roundTripper)(nil)
 // roundTripper implements the RoundTripper interface. It wraps a
 // http3.RoundTripper, making it compatible with SCION
 type roundTripper struct {
-	rt *http3.RoundTripper
+	rt *http.Transport
 }
 
 // RoundTrip does a single round trip; retrieving a response for a given request
@@ -71,19 +86,9 @@ func (t *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.rt.RoundTrip(&cpy)
 }
 
-// Close closes the QUIC connections that this RoundTripper has used
-func (t *roundTripper) Close() (err error) {
-
-	if t.rt != nil {
-		err = t.rt.Close()
-	}
-
-	return err
-}
-
-// dial is the Dial function used in RoundTripper
-func dial(network, address string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlySession, error) {
-	return appquic.DialEarly(appnet.UnmangleSCIONAddr(address), tlsCfg, cfg)
+func (t *roundTripper) Close() error {
+	t.rt.CloseIdleConnections()
+	return nil
 }
 
 var scionAddrURLRegexp = regexp.MustCompile(

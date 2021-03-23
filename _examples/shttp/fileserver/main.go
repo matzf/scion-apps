@@ -17,8 +17,6 @@
 package main
 
 import (
-	"flag"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -28,12 +26,10 @@ import (
 )
 
 func main() {
-	port := flag.Uint("p", 443, "port the server listens on")
-	flag.Parse()
-
 	handler := handlers.LoggingHandler(
 		os.Stdout,
 		http.FileServer(http.Dir("")),
 	)
-	log.Fatal(shttp.ListenAndServe(fmt.Sprintf(":%d", *port), handler, nil))
+	go func() { log.Fatal(shttp.ListenAndServe(":80", handler)) }()
+	log.Fatal(shttp.ListenAndServeTLS(":443", "certs/server.crt", "certs/server.key", handler))
 }
