@@ -45,7 +45,7 @@ func main() {
 		log.Printf("Listen on SCION %s\n", *local)
 		// ListenAndServe does not support listening on a complete SCION Address,
 		// Consequently, we only use the port (as seen in the server example)
-		log.Fatalf("%s", shttp.ListenAndServe(fmt.Sprintf(":%d", lAddr.Host.Port), mux, nil))
+		log.Fatalf("%s", shttp.ListenAndServe(fmt.Sprintf(":%d", lAddr.Host.Port), mux))
 	} else {
 		log.Printf("Listen on HTTP %s\n", *local)
 		log.Fatalf("%s", http.ListenAndServe(*local, mux))
