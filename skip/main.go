@@ -26,10 +26,13 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strings"
 	"text/template"
 
+	"github.com/gorilla/handlers"
+	"github.com/netsec-ethz/scion-apps/pkg/appnet/appquic"
 	"github.com/netsec-ethz/scion-apps/pkg/shttp"
 	"gopkg.in/alecthomas/kingpin.v2"
 )
@@ -57,32 +60,30 @@ func main() {
 	kingpin.Flag("bind", "Address to bind on").Default("localhost:8888").TCPVar(&bindAddress)
 	kingpin.Parse()
 
-	/*
-		transport := shttp.NewRoundTripper(&tls.Config{InsecureSkipVerify: true}, nil)
-		defer transport.Close()
-		proxy := &proxyHandler{
-			transport: transport,
+	transport := shttp.NewRoundTripper(&tls.Config{InsecureSkipVerify: true}, nil)
+	defer transport.Close()
+	proxy := &proxyHandler{
+		transport: transport,
+	}
+	mux := http.NewServeMux()
+	mux.Handle("localhost/skip.pac", http.HandlerFunc(handleWPAD))
+	if bindAddress.IP != nil {
+		mux.Handle(bindAddress.IP.String()+"/skip.pac", http.HandlerFunc(handleWPAD))
+	}
+	mux.Handle("/", proxy) // everything else
+
+	interceptConnect := func(next http.Handler) http.HandlerFunc {
+		return func(w http.ResponseWriter, req *http.Request) {
+			if req.Method == http.MethodConnect {
+				handleTunneling(w, req)
+			}
+			next.ServeHTTP(w, req)
 		}
-		r := mux.NewRouter()
-		r.HandleFunc("/skip.pac", handleWPAD).Host("localhost")
-		if bindAddress.IP != nil {
-			r.HandleFunc("/skip.pac", handleWPAD).Host(bindAddress.IP.String())
-		}
-		r.HandleFunc("/", handleTunneling).Methods("CONNECT")
-		r.Handle("/", proxy) // everything else
-		r.Use(func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				log.Println(r.RequestURI, r.Method)
-				next.ServeHTTP(w, r)
-			})
-		})
-		r.Use(func(next http.Handler) http.Handler {
-			return handlers.LoggingHandler(os.Stdout, next)
-		})
-	*/
+	}
+
 	server := &http.Server{
 		Addr:    bindAddress.String(),
-		Handler: http.HandlerFunc(handleTunneling),
+		Handler: handlers.LoggingHandler(os.Stdout, interceptConnect(mux)),
 	}
 	log.Fatal(server.ListenAndServe())
 }
@@ -129,31 +130,25 @@ func copyHeader(dst, src http.Header) {
 }
 
 func handleTunneling(w http.ResponseWriter, req *http.Request) {
-	fmt.Println(req.Host, req.Method)
-	/*
-		session, err := appquic.DialEarly(
-			r.Host,
-			&tls.Config{
-				InsecureSkipVerify: true,
-				NextProtos:         []string{"h3-29", "h3-32"},
-			},
-			nil)
-		if err != nil {
-			fmt.Println(err.Error())
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		fmt.Println("dialed", session.LocalAddr(), session.RemoteAddr())
-		dest_conn, err := session.OpenStream()
-	*/
-	transport := shttp.NewRoundTripper(&tls.Config{InsecureSkipVerify: true}, nil)
-	defer transport.Close()
-	resp, err := transport.RoundTrip(req)
+	fmt.Println("handleTunneling", req)
+	session, err := appquic.Dial(
+		req.Host,
+		&tls.Config{
+			InsecureSkipVerify: true,
+			NextProtos:         []string{"raw"},
+		},
+		nil)
+	if err != nil {
+		fmt.Println(err.Error())
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	fmt.Println("dialed", session.LocalAddr(), session.RemoteAddr())
+	dest_conn, err := session.OpenStream()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
-	defer resp.Body.Close()
 	w.WriteHeader(http.StatusOK)
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {

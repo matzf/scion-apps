@@ -45,7 +45,7 @@ func NewRoundTripper(tlsClientCfg *tls.Config, quicCfg *quic.Config) RoundTrippe
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				// Note: for https we have two TLS! This is the config for pretend-its-TCP QUIC
 				tlsCfg := &tls.Config{
-					NextProtos:         []string{nextProtoRaw},
+					NextProtos:         []string{NextProtoRaw},
 					InsecureSkipVerify: true,
 				}
 				sess, err := appquic.Dial(appnet.UnmangleSCIONAddr(addr), tlsCfg, quicCfg)

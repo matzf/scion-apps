@@ -24,14 +24,14 @@ import (
 	"github.com/netsec-ethz/scion-apps/pkg/appnet/appquic"
 )
 
-const nextProtoRaw = "raw" // Used for pretend-its-TCP QUIC
+const NextProtoRaw = "raw" // Used for pretend-its-TCP QUIC
 
 // Server wraps a http.Server making it work with SCION
 type Server struct {
 	*http.Server
 }
 
-// ListenAndServe listens for HTTPS connections on the SCION address addr and calls Serve
+// ListenAndServe listens for HTTP connections on the SCION address addr and calls Serve
 // with handler to handle requests
 func ListenAndServe(addr string, handler http.Handler) error {
 	scionServer := &Server{
@@ -79,7 +79,7 @@ func listen(addr string) (net.Listener, error) {
 		return nil, err
 	}
 	tlsCfg := &tls.Config{
-		NextProtos:   []string{nextProtoRaw},
+		NextProtos:   []string{NextProtoRaw},
 		Certificates: appquic.GetDummyTLSCerts(),
 	}
 	quicListener, err := appquic.Listen(laddr, tlsCfg, nil)
@@ -110,6 +110,5 @@ type singleStreamSession struct {
 
 func (s singleStreamSession) Close() error {
 	s.Stream.Close()
-	//return s.Session.CloseWithError(0, "")
-	return nil
+	return s.Session.CloseWithError(0, "")
 }

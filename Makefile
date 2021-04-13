@@ -24,7 +24,7 @@ build: scion-bat \
 	scion-webapp \
 	example-helloworld \
 	example-hellodrkey \
-	example-shttp-client example-shttp-server example-shttp-fileserver example-shttp-proxy
+	example-shttp-client example-shttp-server example-shttp-fileserver example-shttp-proxy example-shttp-gateway
 
 clean:
 	go clean ./...
@@ -116,6 +116,10 @@ example-shttp-fileserver:
 .PHONY: example-shttp-proxy
 example-shttp-proxy:
 	go build -tags=$(TAGS) -o $(BIN)/$@ ./_examples/shttp/proxy
+
+.PHONY: example-shttp-gateway
+example-shttp-gateway:
+	go build -tags=$(TAGS) -o $(BIN)/$@ ./_examples/shttp/gateway
 
 .PHONY: example-hellodrkey
 example-hellodrkey:

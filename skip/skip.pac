@@ -5,6 +5,7 @@ const scionHosts = new Set([
   "docs.scionlab.org",
   "www.scion-architecture.net",
   "netsec.ethz.ch",
+  "element.inf.ethz.ch",
 ])
 
 function FindProxyForURL(url, host)
